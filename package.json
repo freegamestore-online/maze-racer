@@ -1,0 +1,14 @@
+{
+  "name": "maze-racer",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "engines": { "node": ">=22" },
+  "pnpm": { "onlyBuiltDependencies": ["esbuild"] },
+  "scripts": {
+    "dev": "pnpm --filter @maze-racer/web dev",
+    "build": "pnpm --filter @maze-racer/web build",
+    "preview": "pnpm --filter @maze-racer/web preview",
+    "typecheck": "pnpm --filter @maze-racer/web exec tsc -b",
+    "test": "pnpm --filter @maze-racer/web test"
+  }
+}
