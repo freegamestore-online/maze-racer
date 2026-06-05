@@ -103,6 +103,82 @@ export function createRunner(maze: Maze, strategy: Strategy = 'astar'): MazeRunn
   };
 }
 
+// --- Blind step-by-step runner (explores, makes mistakes, backtracks) ---
+
+export function createBlindRunner(maze: Maze): MazeRunner {
+  const { grid, rows, cols, start, exit } = maze;
+  let pos: Pos = [...start];
+  const visited = new Set<string>([key(start)]);
+  const stack: Pos[] = [pos]; // DFS backtrack stack
+  let steps = 0;
+  let finished = false;
+  let success = false;
+  const trail: Pos[] = [pos];
+
+  return {
+    get pos() { return pos; },
+    get path() { return trail; },
+    get done() { return finished; },
+    get won() { return success; },
+    get steps() { return steps; },
+
+    step(): Direction | null {
+      if (finished) return null;
+
+      // Check if we reached the exit
+      if (pos[0] === exit[0] && pos[1] === exit[1]) {
+        finished = true;
+        success = true;
+        return null;
+      }
+
+      // Find unvisited neighbors (randomize order for variety)
+      const neighbors: [number, number, Direction][] = [];
+      for (const [dr, dc, dir] of DIRS) {
+        const nr = pos[0] + dr;
+        const nc = pos[1] + dc;
+        if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && grid[nr][nc] === 0 && !visited.has(`${nr},${nc}`)) {
+          neighbors.push([nr, nc, dir]);
+        }
+      }
+
+      if (neighbors.length > 0) {
+        // Prefer direction toward exit (greedy bias) but sometimes pick random
+        neighbors.sort((a, b) => {
+          const da = Math.abs(a[0] - exit[0]) + Math.abs(a[1] - exit[1]);
+          const db = Math.abs(b[0] - exit[0]) + Math.abs(b[1] - exit[1]);
+          return da - db;
+        });
+        // 70% chance to pick best, 30% random — makes it fallible
+        const pick = (Math.random() < 0.7) ? neighbors[0] : neighbors[Math.floor(Math.random() * neighbors.length)];
+        const [nr, nc, dir] = pick;
+        visited.add(`${nr},${nc}`);
+        stack.push(pos);
+        pos = [nr, nc];
+        trail.push(pos);
+        steps++;
+        return dir;
+      }
+
+      // Dead end — backtrack
+      if (stack.length > 0) {
+        const prev = stack.pop()!;
+        const dir: Direction = prev[0] < pos[0] ? 'up' : prev[0] > pos[0] ? 'down' : prev[1] < pos[1] ? 'left' : 'right';
+        pos = prev;
+        trail.push(pos);
+        steps++;
+        return dir;
+      }
+
+      // Fully stuck (shouldn't happen in valid mazes)
+      finished = true;
+      return null;
+    },
+  };
+}
+
+function key(p: Pos): string { return `${p[0]},${p[1]}`; }
+
 // --- Maze generation ---
 
 export function generateMaze(rows: number, cols: number, seed?: number): Maze {
@@ -352,8 +428,6 @@ function solveGreedy(maze: Maze): { path: Pos[]; explored: number } {
 }
 
 // --- Helpers ---
-
-function key(p: Pos): string { return `${p[0]},${p[1]}`; }
 
 function reconstructPath(parent: Map<string, string>, start: Pos, end: Pos): Pos[] {
   const path: Pos[] = [];

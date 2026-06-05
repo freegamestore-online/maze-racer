@@ -15,6 +15,7 @@ import {
   generateMaze,
   solve,
   createRunner,
+  createBlindRunner,
   type Maze,
   type Strategy,
   type Pos,
@@ -26,16 +27,25 @@ const CELL = 18;
 interface Difficulty {
   label: string;
   size: number;
-  aiMs: number;
   strategy: Strategy;
+  blind: boolean; // true = AI explores in real-time (makes mistakes)
 }
 
 const DIFFS: Record<string, Difficulty> = {
-  easy:   { label: "Easy",   size: 11, aiMs: 200, strategy: "greedy" },
-  medium: { label: "Medium", size: 15, aiMs: 140, strategy: "wall-follower" },
-  hard:   { label: "Hard",   size: 21, aiMs: 100, strategy: "astar" },
-  expert: { label: "Expert", size: 31, aiMs: 60,  strategy: "astar" },
+  easy:   { label: "Easy",   size: 11, strategy: "greedy",         blind: true },
+  medium: { label: "Medium", size: 15, strategy: "wall-follower",  blind: true },
+  hard:   { label: "Hard",   size: 21, strategy: "astar",          blind: false },
+  expert: { label: "Expert", size: 31, strategy: "astar",          blind: false },
 };
+
+interface AISpeed { label: string; ms: number; key: string }
+const AI_SPEEDS: AISpeed[] = [
+  { label: "Frozen",  ms: 9999, key: "0" },
+  { label: "Slow",    ms: 300,  key: "q" },
+  { label: "Normal",  ms: 150,  key: "w" },  // note: w also used for up — speed keys only work in menu
+  { label: "Fast",    ms: 80,   key: "e" },
+  { label: "Insane",  ms: 30,   key: "r" },  // note: r also used for restart
+];
 
 type Phase = "menu" | "playing" | "won" | "lost";
 type Facing = "right" | "left" | "up" | "down";
@@ -44,6 +54,8 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("menu");
   const [diffKey, setDiffKey] = useState("hard");
   const diff = DIFFS[diffKey]!;
+  const [aiSpeedIdx, setAiSpeedIdx] = useState(2); // Normal
+  const aiSpeed = AI_SPEEDS[aiSpeedIdx]!;
   const [maze, setMaze] = useState<Maze>(() => generateMaze(diff.size, diff.size));
   const [playerSteps, setPlayerSteps] = useState(0);
   const [aiSteps, setAiSteps] = useState(0);
@@ -89,6 +101,9 @@ export default function App() {
     aiRunner.current = null;
   }, [diffKey]);
 
+  const aiMsRef = useRef(aiSpeed.ms);
+  aiMsRef.current = aiSpeed.ms;
+
   const startRace = useCallback(() => {
     const d = DIFFS[diffKey]!;
     const m = mazeRef.current;
@@ -102,28 +117,38 @@ export default function App() {
     setPlayerSteps(0);
     setAiSteps(0);
 
-    const runner = createRunner(m, d.strategy);
+    const runner = d.blind ? createBlindRunner(m) : createRunner(m, d.strategy);
     aiRunner.current = runner;
     aiFace.current = "right";
 
-    aiTimer.current = setInterval(() => {
+    // AI uses its own accumulator so speed can change mid-game
+    let aiAccum = 0;
+    let lastAiTick = performance.now();
+    const aiLoop = () => {
       if (!aiRunner.current || aiRunner.current.done) {
-        if (aiTimer.current) clearInterval(aiTimer.current);
         if (aiRunner.current?.won) {
           setPhase(p => p === "playing" ? "lost" : p);
           if (moveTimer.current) clearInterval(moveTimer.current);
         }
         return;
       }
-      const dir = aiRunner.current.step();
-      if (dir === "right") aiFace.current = "right";
-      else if (dir === "left") aiFace.current = "left";
-      else if (dir === "up") aiFace.current = "up";
-      else if (dir === "down") aiFace.current = "down";
-      const [r, c] = aiRunner.current.pos;
-      aiTrail.current.add(`${r},${c}`);
-      setAiSteps(aiRunner.current.steps);
-    }, d.aiMs);
+      const now = performance.now();
+      aiAccum += now - lastAiTick;
+      lastAiTick = now;
+      const ms = aiMsRef.current;
+      while (aiAccum >= ms && aiRunner.current && !aiRunner.current.done) {
+        const dir = aiRunner.current.step();
+        if (dir === "right") aiFace.current = "right";
+        else if (dir === "left") aiFace.current = "left";
+        else if (dir === "up") aiFace.current = "up";
+        else if (dir === "down") aiFace.current = "down";
+        const [r, c] = aiRunner.current.pos;
+        aiTrail.current.add(`${r},${c}`);
+        setAiSteps(aiRunner.current.steps);
+        aiAccum -= ms;
+      }
+    };
+    aiTimer.current = setInterval(aiLoop, 16);
 
     // Player auto-move (pac-man: runs in set direction until wall)
     moveTimer.current = setInterval(() => {
@@ -176,11 +201,14 @@ export default function App() {
         if (phaseRef.current === "menu") startRace();
         else if (phaseRef.current === "won" || phaseRef.current === "lost") newMaze();
       }
-      if (e.key === "r" || e.key === "R") { e.preventDefault(); newMaze(); }
+      if (e.key === "n" || e.key === "N") { e.preventDefault(); newMaze(); }
       if (e.key === "1") { setDiffKey("easy"); newMaze("easy"); }
       if (e.key === "2") { setDiffKey("medium"); newMaze("medium"); }
       if (e.key === "3") { setDiffKey("hard"); newMaze("hard"); }
       if (e.key === "4") { setDiffKey("expert"); newMaze("expert"); }
+      // AI speed: - / + or [ / ]
+      if (e.key === "-" || e.key === "[") { e.preventDefault(); setAiSpeedIdx(i => Math.max(0, i - 1)); }
+      if (e.key === "=" || e.key === "+" || e.key === "]") { e.preventDefault(); setAiSpeedIdx(i => Math.min(AI_SPEEDS.length - 1, i + 1)); }
     };
 
     let touchXY: { x: number; y: number } | null = null;
@@ -291,11 +319,19 @@ export default function App() {
   return (
     <GameShell topbar={
       <GameTopbar title={`Maze Racer  Lvl ${level}`} score={score} actions={
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
           {Object.entries(DIFFS).map(([k, d]) => (
             <button key={k} onClick={() => { setDiffKey(k); newMaze(k); }}
               style={{ background: diffKey === k ? "var(--accent)" : "var(--panel)", color: diffKey === k ? "#fff" : "var(--muted)", border: `1px solid ${diffKey === k ? "var(--accent)" : "var(--line)"}`, borderRadius: 8, padding: "2px 7px", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
               {d.label}
+            </button>
+          ))}
+          <span style={{ color: "var(--muted)", fontSize: 10, margin: "0 2px" }}>|</span>
+          <span style={{ fontSize: 10, color: "var(--muted)" }}>AI:</span>
+          {AI_SPEEDS.map((s, i) => (
+            <button key={s.label} onClick={() => setAiSpeedIdx(i)}
+              style={{ background: aiSpeedIdx === i ? "#a855f7" : "var(--panel)", color: aiSpeedIdx === i ? "#fff" : "var(--muted)", border: `1px solid ${aiSpeedIdx === i ? "#a855f7" : "var(--line)"}`, borderRadius: 8, padding: "2px 6px", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>
+              {s.label}
             </button>
           ))}
         </div>
@@ -305,8 +341,8 @@ export default function App() {
 
         <div style={{ display: "flex", gap: 16, fontSize: 12, flexWrap: "wrap", justifyContent: "center" }}>
           <span>&#x1F7E1; You: <b>{playerSteps}</b></span>
-          <span>&#x1F7E3; AI ({diff.strategy}): <b>{aiSteps}</b></span>
-          <span style={{ color: "var(--muted)", fontSize: 11 }}>Best: {opt.path.length - 1} | {diff.aiMs}ms</span>
+          <span>&#x1F7E3; AI ({diff.blind ? "blind " : ""}{diff.strategy}): <b>{aiSteps}</b></span>
+          <span style={{ color: "var(--muted)", fontSize: 11 }}>Best: {opt.path.length - 1} | AI {aiSpeed.label} ({aiSpeed.ms}ms)</span>
         </div>
 
         <canvas ref={canvasRef} style={{ borderRadius: "var(--radius)", border: "2px solid var(--line)", imageRendering: "pixelated", maxWidth: "100%", maxHeight: "55vh" }} />
@@ -317,7 +353,7 @@ export default function App() {
               Start Race
             </button>
             <p style={{ color: "var(--muted)", fontSize: 11, marginTop: 6 }}>
-              Arrows/WASD = direction (auto-runs). Space/Enter = start. R = new maze. 1-4 = difficulty.
+              Arrows/WASD = direction (auto-runs). Space/Enter = start. N = new maze. 1-4 = difficulty. -/+ = AI speed.
             </p>
           </div>
         )}
