@@ -14,10 +14,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   generateMaze,
   solve,
-  createRunner,
   createBlindRunner,
   type Maze,
-  type Strategy,
   type Pos,
   type MazeRunner,
 } from "./lib/maze-solver";
@@ -27,15 +25,15 @@ const CELL = 18;
 interface Difficulty {
   label: string;
   size: number;
-  strategy: Strategy;
-  blind: boolean;
+  smartness: number; // 0 = drunk random walk, 1 = always picks best direction
+  desc: string;
 }
 
 const DIFFS: Record<string, Difficulty> = {
-  easy:   { label: "Easy",   size: 11, strategy: "greedy",        blind: true },
-  medium: { label: "Medium", size: 15, strategy: "wall-follower", blind: true },
-  hard:   { label: "Hard",   size: 21, strategy: "astar",         blind: false },
-  expert: { label: "Expert", size: 31, strategy: "astar",         blind: false },
+  easy:   { label: "Easy",   size: 11, smartness: 0.2, desc: "drunk" },
+  medium: { label: "Medium", size: 15, smartness: 0.5, desc: "coin-flip" },
+  hard:   { label: "Hard",   size: 21, smartness: 0.8, desc: "smart" },
+  expert: { label: "Expert", size: 31, smartness: 0.95, desc: "genius" },
 };
 
 interface AISpeed { label: string; ms: number }
@@ -141,7 +139,7 @@ export default function App() {
     }, 100);
 
     // AI
-    const runner = d.blind ? createBlindRunner(m) : createRunner(m, d.strategy);
+    const runner = createBlindRunner(m, d.smartness);
     aiRunner.current = runner;
     aiFace.current = "right";
 
@@ -380,7 +378,7 @@ export default function App() {
         {/* Scoreboard */}
         <div style={{ display: "flex", gap: 12, fontSize: 12, flexWrap: "wrap", justifyContent: "center", alignItems: "center" }}>
           <span style={{ color: "#facc15", fontWeight: 600 }}>You: {playerSteps}</span>
-          <span style={{ color: "#a855f7", fontWeight: 600 }}>AI{diff.blind ? " (blind)" : ""}: {aiSteps}</span>
+          <span style={{ color: "#a855f7", fontWeight: 600 }}>AI ({diff.desc} {Math.round(diff.smartness * 100)}%): {aiSteps}</span>
           <span style={{ fontFamily: "monospace", color: "var(--muted)", fontSize: 13 }}>{fmtTime(elapsed)}</span>
           {bestTime !== null && <span style={{ color: "var(--muted)", fontSize: 10 }}>Best: {fmtTime(bestTime)}</span>}
           <span style={{ color: "var(--muted)", fontSize: 10 }}>Optimal: {opt.path.length - 1}</span>

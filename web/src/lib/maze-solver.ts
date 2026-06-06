@@ -104,8 +104,15 @@ export function createRunner(maze: Maze, strategy: Strategy = 'astar'): MazeRunn
 }
 
 // --- Blind step-by-step runner (explores, makes mistakes, backtracks) ---
+//
+// smartness (0-1) controls how often the AI picks the best neighbor:
+//   0.0 = pure random walk (drunk, very lost)
+//   0.3 = mostly random, occasionally lucky
+//   0.5 = coin flip between smart and random
+//   0.7 = usually smart, sometimes wanders
+//   1.0 = always picks neighbor closest to exit (greedy, still backtracks at dead ends)
 
-export function createBlindRunner(maze: Maze): MazeRunner {
+export function createBlindRunner(maze: Maze, smartness = 0.5): MazeRunner {
   const { grid, rows, cols, start, exit } = maze;
   let pos: Pos = [...start];
   const visited = new Set<string>([key(start)]);
@@ -125,14 +132,13 @@ export function createBlindRunner(maze: Maze): MazeRunner {
     step(): Direction | null {
       if (finished) return null;
 
-      // Check if we reached the exit
       if (pos[0] === exit[0] && pos[1] === exit[1]) {
         finished = true;
         success = true;
         return null;
       }
 
-      // Find unvisited neighbors (randomize order for variety)
+      // Find unvisited open neighbors
       const neighbors: [number, number, Direction][] = [];
       for (const [dr, dc, dir] of DIRS) {
         const nr = pos[0] + dr;
@@ -143,14 +149,21 @@ export function createBlindRunner(maze: Maze): MazeRunner {
       }
 
       if (neighbors.length > 0) {
-        // Prefer direction toward exit (greedy bias) but sometimes pick random
-        neighbors.sort((a, b) => {
-          const da = Math.abs(a[0] - exit[0]) + Math.abs(a[1] - exit[1]);
-          const db = Math.abs(b[0] - exit[0]) + Math.abs(b[1] - exit[1]);
-          return da - db;
-        });
-        // 70% chance to pick best, 30% random — makes it fallible
-        const pick = (Math.random() < 0.7) ? neighbors[0] : neighbors[Math.floor(Math.random() * neighbors.length)];
+        let pick: [number, number, Direction];
+
+        if (Math.random() < smartness) {
+          // Smart: pick neighbor closest to exit (Manhattan)
+          neighbors.sort((a, b) => {
+            const da = Math.abs(a[0] - exit[0]) + Math.abs(a[1] - exit[1]);
+            const db = Math.abs(b[0] - exit[0]) + Math.abs(b[1] - exit[1]);
+            return da - db;
+          });
+          pick = neighbors[0];
+        } else {
+          // Random: pick any neighbor
+          pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+        }
+
         const [nr, nc, dir] = pick;
         visited.add(`${nr},${nc}`);
         stack.push(pos);
@@ -170,7 +183,6 @@ export function createBlindRunner(maze: Maze): MazeRunner {
         return dir;
       }
 
-      // Fully stuck (shouldn't happen in valid mazes)
       finished = true;
       return null;
     },
