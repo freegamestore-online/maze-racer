@@ -3,10 +3,11 @@
  *
  * Race a FAGS heuristic AI through a procedurally generated maze.
  * Pac-Man style: set direction, auto-run until wall.
- * Both pac-mans show facing direction with animated mouth.
- * AI can be blind (explores/backtracks) or omniscient (pre-solved).
+ * AI explores blind — never pre-solves. Smartness = how often it
+ * picks the best neighbor vs random.
  *
- * Cross-store demo: FGS game consuming FAGS maze-solver agent.
+ * Input buffering: queues next direction so you can press ahead of
+ * turns. Held keys tracked so diagonal input (up+right) tries both.
  */
 
 import { GameShell, GameTopbar } from "@freegamestore/games";
@@ -25,7 +26,7 @@ const CELL = 18;
 interface Difficulty {
   label: string;
   size: number;
-  smartness: number; // 0 = drunk random walk, 1 = always picks best direction
+  smartness: number;
   desc: string;
 }
 
@@ -65,8 +66,15 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerPos = useRef<Pos>([...maze.start]);
   const playerFace = useRef<Facing>("right");
+  // Current movement direction
   const playerDr = useRef(0);
   const playerDc = useRef(0);
+  // Input buffer: queued next direction (applied when current direction hits wall)
+  const bufDr = useRef(0);
+  const bufDc = useRef(0);
+  const hasBuf = useRef(false);
+  // Currently held keys (for simultaneous press)
+  const heldKeys = useRef(new Set<string>());
   const playerTrail = useRef(new Set([`${maze.start[0]},${maze.start[1]}`]));
   const aiRunner = useRef<MazeRunner | null>(null);
   const aiFace = useRef<Facing>("right");
@@ -100,6 +108,10 @@ export default function App() {
     playerFace.current = "right";
     playerDr.current = 0;
     playerDc.current = 0;
+    bufDr.current = 0;
+    bufDc.current = 0;
+    hasBuf.current = false;
+    heldKeys.current.clear();
     playerTrail.current = new Set([`${m.start[0]},${m.start[1]}`]);
     aiFace.current = "right";
     aiTrail.current = new Set();
@@ -116,6 +128,11 @@ export default function App() {
     setBestTime(prev => prev === null ? t : Math.min(prev, t));
   }, []);
 
+  const canMove = (mz: Maze, cr: number, cc: number, dr: number, dc: number) => {
+    const nr = cr + dr, nc = cc + dc;
+    return nr >= 0 && nr < mz.rows && nc >= 0 && nc < mz.cols && mz.grid[nr]![nc] === 0;
+  };
+
   const startRace = useCallback(() => {
     const d = DIFFS[diffKey]!;
     const m = mazeRef.current;
@@ -126,19 +143,20 @@ export default function App() {
     playerFace.current = "right";
     playerDr.current = 0;
     playerDc.current = 0;
+    bufDr.current = 0;
+    bufDc.current = 0;
+    hasBuf.current = false;
+    heldKeys.current.clear();
     setPlayerSteps(0);
     setAiSteps(0);
     setElapsed(0);
     startTime.current = performance.now();
 
-    // Timer
     clockTimer.current = setInterval(() => {
-      if (phaseRef.current === "playing") {
-        setElapsed((performance.now() - startTime.current) / 1000);
-      }
+      if (phaseRef.current === "playing") setElapsed((performance.now() - startTime.current) / 1000);
     }, 100);
 
-    // AI
+    // AI — always blind, never pre-solves
     const runner = createBlindRunner(m, d.smartness);
     aiRunner.current = runner;
     aiFace.current = "right";
@@ -168,43 +186,89 @@ export default function App() {
       }
     }, 16);
 
-    // Player auto-move
+    // Player auto-move with input buffering
     moveTimer.current = setInterval(() => {
       if (phaseRef.current !== "playing") return;
-      const dr = playerDr.current, dc = playerDc.current;
-      if (dr === 0 && dc === 0) return;
       const mz = mazeRef.current;
       const [cr, cc] = playerPos.current;
-      const nr = cr + dr, nc = cc + dc;
-      if (nr >= 0 && nr < mz.rows && nc >= 0 && nc < mz.cols && mz.grid[nr]![nc] === 0) {
+      let dr = playerDr.current, dc = playerDc.current;
+
+      // If buffered direction exists and current direction is blocked, switch
+      if (hasBuf.current && !canMove(mz, cr, cc, dr, dc)) {
+        dr = bufDr.current;
+        dc = bufDc.current;
+        playerDr.current = dr;
+        playerDc.current = dc;
+        hasBuf.current = false;
+        if (dc > 0) playerFace.current = "right";
+        else if (dc < 0) playerFace.current = "left";
+        else if (dr < 0) playerFace.current = "up";
+        else if (dr > 0) playerFace.current = "down";
+      }
+
+      // Also try buffered direction if it's passable (even if current isn't blocked yet)
+      if (hasBuf.current && canMove(mz, cr, cc, bufDr.current, bufDc.current)) {
+        dr = bufDr.current;
+        dc = bufDc.current;
+        playerDr.current = dr;
+        playerDc.current = dc;
+        hasBuf.current = false;
+        if (dc > 0) playerFace.current = "right";
+        else if (dc < 0) playerFace.current = "left";
+        else if (dr < 0) playerFace.current = "up";
+        else if (dr > 0) playerFace.current = "down";
+      }
+
+      if (dr === 0 && dc === 0) return;
+
+      if (canMove(mz, cr, cc, dr, dc)) {
+        const nr = cr + dr, nc = cc + dc;
         playerPos.current = [nr, nc];
         playerTrail.current.add(`${nr},${nc}`);
         setPlayerSteps(s => s + 1);
         if (nr === mz.exit[0] && nc === mz.exit[1]) finishWin();
       }
+      // Wall: keep direction, wait for buffer or new input
     }, 90);
   }, [diffKey, finishWin]);
 
-  // Input
+  // Input: track held keys, buffer directions
   useEffect(() => {
-    const setDir = (dr: number, dc: number) => {
-      if (phaseRef.current !== "playing") return;
-      playerDr.current = dr;
-      playerDc.current = dc;
-      if (dc > 0) playerFace.current = "right";
-      else if (dc < 0) playerFace.current = "left";
-      else if (dr < 0) playerFace.current = "up";
-      else if (dr > 0) playerFace.current = "down";
+    const dirMap: Record<string, [number, number]> = {
+      ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
+      w: [-1, 0], s: [1, 0], a: [0, -1], d: [0, 1],
     };
-    (window as any).__mazeSetDir = setDir; // expose for d-pad buttons
 
-    const onKey = (e: KeyboardEvent) => {
-      const dirs: Record<string, [number, number]> = {
-        ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
-        w: [-1, 0], s: [1, 0], a: [0, -1], d: [0, 1],
-      };
-      const dir = dirs[e.key];
-      if (dir) { e.preventDefault(); setDir(dir[0], dir[1]); return; }
+    const applyDir = (dr: number, dc: number) => {
+      if (phaseRef.current !== "playing") return;
+      const face: Facing = dc > 0 ? "right" : dc < 0 ? "left" : dr < 0 ? "up" : "down";
+      // If this is a different direction than current, buffer it
+      if (dr !== playerDr.current || dc !== playerDc.current) {
+        // If player is currently stopped or this direction works immediately, apply it
+        const mz = mazeRef.current;
+        const [cr, cc] = playerPos.current;
+        if ((playerDr.current === 0 && playerDc.current === 0) || canMove(mz, cr, cc, dr, dc)) {
+          playerDr.current = dr;
+          playerDc.current = dc;
+          playerFace.current = face;
+          hasBuf.current = false;
+        } else {
+          // Buffer it for the next tick
+          bufDr.current = dr;
+          bufDc.current = dc;
+          hasBuf.current = true;
+        }
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const dir = dirMap[e.key];
+      if (dir) {
+        e.preventDefault();
+        heldKeys.current.add(e.key);
+        applyDir(dir[0], dir[1]);
+        return;
+      }
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         if (phaseRef.current === "menu") startRace();
@@ -219,6 +283,18 @@ export default function App() {
       if (e.key === "=" || e.key === "+" || e.key === "]") { e.preventDefault(); setAiSpeedIdx(i => Math.min(AI_SPEEDS.length - 1, i + 1)); }
     };
 
+    const onKeyUp = (e: KeyboardEvent) => {
+      heldKeys.current.delete(e.key);
+      // If current direction key was released, check if another direction is still held
+      if (dirMap[e.key] && phaseRef.current === "playing") {
+        // Find a still-held direction key
+        for (const held of heldKeys.current) {
+          const d = dirMap[held];
+          if (d) { applyDir(d[0], d[1]); return; }
+        }
+      }
+    };
+
     let touchXY: { x: number; y: number } | null = null;
     const onTS = (e: TouchEvent) => { const t = e.touches[0]; if (t) touchXY = { x: t.clientX, y: t.clientY }; };
     const onTE = (e: TouchEvent) => {
@@ -227,14 +303,23 @@ export default function App() {
       const dx = t.clientX - touchXY.x, dy = t.clientY - touchXY.y;
       touchXY = null;
       if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
-      if (Math.abs(dx) > Math.abs(dy)) setDir(0, dx > 0 ? 1 : -1);
-      else setDir(dy > 0 ? 1 : -1, 0);
+      if (Math.abs(dx) > Math.abs(dy)) applyDir(0, dx > 0 ? 1 : -1);
+      else applyDir(dy > 0 ? 1 : -1, 0);
     };
 
-    window.addEventListener("keydown", onKey);
+    // Expose for d-pad
+    (window as any).__mazeSetDir = applyDir;
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
     window.addEventListener("touchstart", onTS, { passive: true });
     window.addEventListener("touchend", onTE, { passive: true });
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("touchstart", onTS); window.removeEventListener("touchend", onTE); };
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("touchstart", onTS);
+      window.removeEventListener("touchend", onTE);
+    };
   }, [startRace, newMaze]);
 
   // Render
@@ -248,7 +333,6 @@ export default function App() {
     const pacman = (cx: number, cy: number, r: number, face: Facing, color: string) => {
       const angles: Record<Facing, number> = { right: 0, down: Math.PI / 2, left: Math.PI, up: -Math.PI / 2 };
       const ang = angles[face];
-      // Animated mouth: oscillates 0.05 - 0.4 radians
       const mouth = 0.05 + Math.abs(Math.sin(frame * 0.15)) * 0.35;
       ctx.fillStyle = color;
       ctx.beginPath();
@@ -256,13 +340,11 @@ export default function App() {
       ctx.arc(cx, cy, r, ang + mouth, ang + Math.PI * 2 - mouth);
       ctx.closePath();
       ctx.fill();
-      // Eye
       const ed = r * 0.35, ea = ang - 0.55;
       ctx.fillStyle = "#000";
       ctx.beginPath();
       ctx.arc(cx + Math.cos(ea) * ed, cy + Math.sin(ea) * ed, r * 0.16, 0, Math.PI * 2);
       ctx.fill();
-      // Eye highlight
       ctx.fillStyle = "#fff";
       ctx.beginPath();
       ctx.arc(cx + Math.cos(ea) * ed + 0.5, cy + Math.sin(ea) * ed - 0.5, r * 0.06, 0, Math.PI * 2);
@@ -276,7 +358,6 @@ export default function App() {
       canvas.height = mz.rows * CELL;
       const dk = matchMedia("(prefers-color-scheme: dark)").matches;
 
-      // Grid
       for (let r = 0; r < mz.rows; r++) {
         for (let c = 0; c < mz.cols; c++) {
           const k = `${r},${c}`;
@@ -284,7 +365,6 @@ export default function App() {
           if (wall) {
             ctx.fillStyle = dk ? "#1e1b4b" : "#6366f1";
             ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
-            // Rounded wall edges
             ctx.fillStyle = dk ? "#2e1f6b" : "#818cf8";
             ctx.fillRect(c * CELL + 1, r * CELL + 1, CELL - 2, CELL - 2);
           } else {
@@ -297,19 +377,19 @@ export default function App() {
       }
 
       // Dots
+      ctx.fillStyle = dk ? "#333" : "#cbd5e1";
       for (let r = 0; r < mz.rows; r++) {
         for (let c = 0; c < mz.cols; c++) {
           if (mz.grid[r]![c] === 1) continue;
           const k = `${r},${c}`;
           if (playerTrail.current.has(k) || aiTrail.current.has(k)) continue;
-          ctx.fillStyle = dk ? "#333" : "#cbd5e1";
           ctx.beginPath();
           ctx.arc(c * CELL + CELL / 2, r * CELL + CELL / 2, 2, 0, Math.PI * 2);
           ctx.fill();
         }
       }
 
-      // Exit — pulsing red
+      // Exit — pulsing
       const pulse = 0.7 + Math.sin(frame * 0.08) * 0.3;
       ctx.globalAlpha = pulse;
       ctx.fillStyle = "#ef4444";
@@ -341,10 +421,11 @@ export default function App() {
 
   useEffect(() => () => clearTimers(), []);
 
-  const opt = solve(maze, "astar");
   const fmtTime = (t: number) => t < 60 ? `${t.toFixed(1)}s` : `${Math.floor(t / 60)}:${(t % 60).toFixed(0).padStart(2, "0")}`;
 
-  // D-pad button helper
+  // Only compute optimal on win/loss (never during play — no cheating)
+  const optSteps = (phase === "won" || phase === "lost") ? solve(maze, "astar").path.length - 1 : null;
+
   const dpad = (label: string, dr: number, dc: number) => (
     <button
       onPointerDown={(e) => { e.preventDefault(); (window as any).__mazeSetDir?.(dr, dc); }}
@@ -378,10 +459,9 @@ export default function App() {
         {/* Scoreboard */}
         <div style={{ display: "flex", gap: 12, fontSize: 12, flexWrap: "wrap", justifyContent: "center", alignItems: "center" }}>
           <span style={{ color: "#facc15", fontWeight: 600 }}>You: {playerSteps}</span>
-          <span style={{ color: "#a855f7", fontWeight: 600 }}>AI ({diff.desc} {Math.round(diff.smartness * 100)}%): {aiSteps}</span>
+          <span style={{ color: "#a855f7", fontWeight: 600 }}>AI ({diff.desc}): {aiSteps}</span>
           <span style={{ fontFamily: "monospace", color: "var(--muted)", fontSize: 13 }}>{fmtTime(elapsed)}</span>
           {bestTime !== null && <span style={{ color: "var(--muted)", fontSize: 10 }}>Best: {fmtTime(bestTime)}</span>}
-          <span style={{ color: "var(--muted)", fontSize: 10 }}>Optimal: {opt.path.length - 1}</span>
         </div>
 
         {/* Canvas */}
@@ -397,14 +477,13 @@ export default function App() {
           {dpad("\u25B6", 0, 1)}
         </div>
 
-        {/* Phase controls */}
         {phase === "menu" && (
           <div style={{ textAlign: "center" }}>
             <button onClick={startRace} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "10px 32px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
               Start Race
             </button>
             <p style={{ color: "var(--muted)", fontSize: 10, marginTop: 4 }}>
-              Arrows/WASD = steer | Space = start | N = new | 1-4 = maze | -/+ = AI speed
+              Arrows/WASD = steer (buffered) | Space = start | N = new | 1-4 = maze | -/+ = AI speed
             </p>
           </div>
         )}
@@ -413,7 +492,7 @@ export default function App() {
           <div style={{ textAlign: "center" }}>
             <p style={{ color: "var(--success)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif" }}>You Win Level {level}!</p>
             <p style={{ color: "var(--muted)", fontSize: 11 }}>
-              {fmtTime(elapsed)} | You: {playerSteps} | AI: {aiSteps} | Optimal: {opt.path.length - 1}
+              {fmtTime(elapsed)} | You: {playerSteps} | AI: {aiSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""}
             </p>
             <button onClick={() => { setLevel(l => l + 1); const keys = Object.keys(DIFFS); const ni = Math.min(keys.indexOf(diffKey) + 1, keys.length - 1); setDiffKey(keys[ni]!); newMaze(keys[ni]!); }}
               style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 4, cursor: "pointer" }}>
@@ -425,7 +504,7 @@ export default function App() {
         {phase === "lost" && (
           <div style={{ textAlign: "center" }}>
             <p style={{ color: "var(--error)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif" }}>AI Wins</p>
-            <p style={{ color: "var(--muted)", fontSize: 11 }}>AI: {aiSteps} | You: {playerSteps} | {fmtTime(elapsed)}</p>
+            <p style={{ color: "var(--muted)", fontSize: 11 }}>AI: {aiSteps} | You: {playerSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""} | {fmtTime(elapsed)}</p>
             <button onClick={() => newMaze()}
               style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 4, cursor: "pointer" }}>
               Try Again
