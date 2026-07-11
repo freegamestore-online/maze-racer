@@ -1,13 +1,12 @@
 /**
  * Maze Racer — FreeGameStore game
  *
- * Race a FAGS heuristic AI through a procedurally generated maze.
+ * Race a heuristic AI through a procedurally generated maze.
  * Pac-Man style: set direction, auto-run until wall.
  * AI explores blind — never pre-solves. Smartness = how often it
  * picks the best neighbor vs random.
  *
- * Input buffering: queues next direction so you can press ahead of
- * turns. Held keys tracked so diagonal input (up+right) tries both.
+ * Best times are stored in localStorage per maze size.
  */
 
 import { GameShell, GameTopbar } from "@freegamestore/games";
@@ -20,6 +19,7 @@ import {
   type Pos,
   type MazeRunner,
 } from "./lib/maze-solver";
+import { useBestTimes } from "./hooks/useBestTimes";
 
 const CELL = 18;
 
@@ -49,7 +49,17 @@ const AI_SPEEDS: AISpeed[] = [
 type Phase = "menu" | "playing" | "won" | "lost";
 type Facing = "right" | "left" | "up" | "down";
 
+/** Format seconds as  m:ss.t  (e.g. "1:04.3") or  0:ss.t  (e.g. "0:07.2") */
+function fmtTime(t: number): string {
+  const mins = Math.floor(t / 60);
+  const secs = Math.floor(t % 60);
+  const tenths = Math.floor((t * 10) % 10);
+  return `${mins}:${String(secs).padStart(2, "0")}.${tenths}`;
+}
+
 export default function App() {
+  const { getBest, trySetBest } = useBestTimes();
+
   const [phase, setPhase] = useState<Phase>("menu");
   const [diffKey, setDiffKey] = useState("hard");
   const diff = DIFFS[diffKey]!;
@@ -61,19 +71,19 @@ export default function App() {
   const [score, setScore] = useState(0);
   const [level, setLevel] = useState(1);
   const [elapsed, setElapsed] = useState(0);
-  const [bestTime, setBestTime] = useState<number | null>(null);
+  // Best time for the currently-selected difficulty size (from localStorage)
+  const [bestTime, setBestTime] = useState<number | null>(() => getBest(DIFFS["hard"]!.size));
+  // Whether the last win was a new record
+  const [isNewRecord, setIsNewRecord] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerPos = useRef<Pos>([...maze.start]);
   const playerFace = useRef<Facing>("right");
-  // Current movement direction
   const playerDr = useRef(0);
   const playerDc = useRef(0);
-  // Input buffer: queued next direction (applied when current direction hits wall)
   const bufDr = useRef(0);
   const bufDc = useRef(0);
   const hasBuf = useRef(false);
-  // Currently held keys (for simultaneous press)
   const heldKeys = useRef(new Set<string>());
   const playerTrail = useRef(new Set([`${maze.start[0]},${maze.start[1]}`]));
   const aiRunner = useRef<MazeRunner | null>(null);
@@ -89,6 +99,15 @@ export default function App() {
   mazeRef.current = maze;
   const aiMsRef = useRef(aiSpeed.ms);
   aiMsRef.current = aiSpeed.ms;
+  // Keep diff ref stable for finishWin closure
+  const diffRef = useRef(diff);
+  diffRef.current = diff;
+
+  // Refresh best time when difficulty changes
+  useEffect(() => {
+    setBestTime(getBest(diff.size));
+    setIsNewRecord(false);
+  }, [diff.size, getBest]);
 
   const clearTimers = () => {
     if (aiTimer.current) { clearInterval(aiTimer.current); aiTimer.current = null; }
@@ -104,6 +123,7 @@ export default function App() {
     setPlayerSteps(0);
     setAiSteps(0);
     setElapsed(0);
+    setIsNewRecord(false);
     playerPos.current = [...m.start];
     playerFace.current = "right";
     playerDr.current = 0;
@@ -125,8 +145,11 @@ export default function App() {
     clearTimers();
     const t = (performance.now() - startTime.current) / 1000;
     setElapsed(t);
-    setBestTime(prev => prev === null ? t : Math.min(prev, t));
-  }, []);
+    const size = diffRef.current.size;
+    const newRecord = trySetBest(size, t);
+    setIsNewRecord(newRecord);
+    if (newRecord) setBestTime(t);
+  }, [trySetBest]);
 
   const canMove = (mz: Maze, cr: number, cc: number, dr: number, dc: number) => {
     const nr = cr + dr, nc = cc + dc;
@@ -137,6 +160,7 @@ export default function App() {
     const d = DIFFS[diffKey]!;
     const m = mazeRef.current;
     setPhase("playing");
+    setIsNewRecord(false);
     playerTrail.current = new Set([`${m.start[0]},${m.start[1]}`]);
     aiTrail.current = new Set([`${m.start[0]},${m.start[1]}`]);
     playerPos.current = [...m.start];
@@ -156,7 +180,6 @@ export default function App() {
       if (phaseRef.current === "playing") setElapsed((performance.now() - startTime.current) / 1000);
     }, 100);
 
-    // AI — always blind, never pre-solves
     const runner = createBlindRunner(m, d.smartness);
     aiRunner.current = runner;
     aiFace.current = "right";
@@ -186,19 +209,15 @@ export default function App() {
       }
     }, 16);
 
-    // Player auto-move with input buffering
     moveTimer.current = setInterval(() => {
       if (phaseRef.current !== "playing") return;
       const mz = mazeRef.current;
       const [cr, cc] = playerPos.current;
       let dr = playerDr.current, dc = playerDc.current;
 
-      // If buffered direction exists and current direction is blocked, switch
       if (hasBuf.current && !canMove(mz, cr, cc, dr, dc)) {
-        dr = bufDr.current;
-        dc = bufDc.current;
-        playerDr.current = dr;
-        playerDc.current = dc;
+        dr = bufDr.current; dc = bufDc.current;
+        playerDr.current = dr; playerDc.current = dc;
         hasBuf.current = false;
         if (dc > 0) playerFace.current = "right";
         else if (dc < 0) playerFace.current = "left";
@@ -206,12 +225,9 @@ export default function App() {
         else if (dr > 0) playerFace.current = "down";
       }
 
-      // Also try buffered direction if it's passable (even if current isn't blocked yet)
       if (hasBuf.current && canMove(mz, cr, cc, bufDr.current, bufDc.current)) {
-        dr = bufDr.current;
-        dc = bufDc.current;
-        playerDr.current = dr;
-        playerDc.current = dc;
+        dr = bufDr.current; dc = bufDc.current;
+        playerDr.current = dr; playerDc.current = dc;
         hasBuf.current = false;
         if (dc > 0) playerFace.current = "right";
         else if (dc < 0) playerFace.current = "left";
@@ -228,11 +244,10 @@ export default function App() {
         setPlayerSteps(s => s + 1);
         if (nr === mz.exit[0] && nc === mz.exit[1]) finishWin();
       }
-      // Wall: keep direction, wait for buffer or new input
     }, 90);
   }, [diffKey, finishWin]);
 
-  // Input: track held keys, buffer directions
+  // Input handling
   useEffect(() => {
     const dirMap: Record<string, [number, number]> = {
       ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
@@ -242,21 +257,14 @@ export default function App() {
     const applyDir = (dr: number, dc: number) => {
       if (phaseRef.current !== "playing") return;
       const face: Facing = dc > 0 ? "right" : dc < 0 ? "left" : dr < 0 ? "up" : "down";
-      // If this is a different direction than current, buffer it
       if (dr !== playerDr.current || dc !== playerDc.current) {
-        // If player is currently stopped or this direction works immediately, apply it
         const mz = mazeRef.current;
         const [cr, cc] = playerPos.current;
         if ((playerDr.current === 0 && playerDc.current === 0) || canMove(mz, cr, cc, dr, dc)) {
-          playerDr.current = dr;
-          playerDc.current = dc;
-          playerFace.current = face;
-          hasBuf.current = false;
+          playerDr.current = dr; playerDc.current = dc;
+          playerFace.current = face; hasBuf.current = false;
         } else {
-          // Buffer it for the next tick
-          bufDr.current = dr;
-          bufDc.current = dc;
-          hasBuf.current = true;
+          bufDr.current = dr; bufDc.current = dc; hasBuf.current = true;
         }
       }
     };
@@ -275,9 +283,9 @@ export default function App() {
         else if (phaseRef.current === "won" || phaseRef.current === "lost") newMaze();
       }
       if (e.key === "n" || e.key === "N") { e.preventDefault(); newMaze(); }
-      if (e.key === "1") { setDiffKey("easy"); newMaze("easy"); }
+      if (e.key === "1") { setDiffKey("easy");   newMaze("easy"); }
       if (e.key === "2") { setDiffKey("medium"); newMaze("medium"); }
-      if (e.key === "3") { setDiffKey("hard"); newMaze("hard"); }
+      if (e.key === "3") { setDiffKey("hard");   newMaze("hard"); }
       if (e.key === "4") { setDiffKey("expert"); newMaze("expert"); }
       if (e.key === "-" || e.key === "[") { e.preventDefault(); setAiSpeedIdx(i => Math.max(0, i - 1)); }
       if (e.key === "=" || e.key === "+" || e.key === "]") { e.preventDefault(); setAiSpeedIdx(i => Math.min(AI_SPEEDS.length - 1, i + 1)); }
@@ -285,9 +293,7 @@ export default function App() {
 
     const onKeyUp = (e: KeyboardEvent) => {
       heldKeys.current.delete(e.key);
-      // If current direction key was released, check if another direction is still held
       if (dirMap[e.key] && phaseRef.current === "playing") {
-        // Find a still-held direction key
         for (const held of heldKeys.current) {
           const d = dirMap[held];
           if (d) { applyDir(d[0], d[1]); return; }
@@ -307,7 +313,6 @@ export default function App() {
       else applyDir(dy > 0 ? 1 : -1, 0);
     };
 
-    // Expose for d-pad
     (window as any).__mazeSetDir = applyDir;
 
     window.addEventListener("keydown", onKeyDown);
@@ -322,7 +327,7 @@ export default function App() {
     };
   }, [startRace, newMaze]);
 
-  // Render
+  // Canvas render loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -368,8 +373,10 @@ export default function App() {
             ctx.fillStyle = dk ? "#2e1f6b" : "#818cf8";
             ctx.fillRect(c * CELL + 1, r * CELL + 1, CELL - 2, CELL - 2);
           } else {
-            ctx.fillStyle = playerTrail.current.has(k) ? (dk ? "rgba(250,204,21,0.08)" : "rgba(250,204,21,0.12)")
-              : aiTrail.current.has(k) ? (dk ? "rgba(168,85,247,0.08)" : "rgba(168,85,247,0.08)")
+            ctx.fillStyle = playerTrail.current.has(k)
+              ? (dk ? "rgba(250,204,21,0.08)" : "rgba(250,204,21,0.12)")
+              : aiTrail.current.has(k)
+              ? (dk ? "rgba(168,85,247,0.08)" : "rgba(168,85,247,0.08)")
               : (dk ? "#0a0a0a" : "#f8fafc");
             ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
           }
@@ -421,9 +428,7 @@ export default function App() {
 
   useEffect(() => () => clearTimers(), []);
 
-  const fmtTime = (t: number) => t < 60 ? `${t.toFixed(1)}s` : `${Math.floor(t / 60)}:${(t % 60).toFixed(0).padStart(2, "0")}`;
-
-  // Only compute optimal on win/loss (never during play — no cheating)
+  // Only compute optimal path on win/loss (never during play)
   const optSteps = (phase === "won" || phase === "lost") ? solve(maze, "astar").path.length - 1 : null;
 
   const dpad = (label: string, dr: number, dc: number) => (
@@ -456,12 +461,21 @@ export default function App() {
     }>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 6, padding: 8 }}>
 
-        {/* Scoreboard */}
+        {/* ── Live timer bar ── */}
         <div style={{ display: "flex", gap: 12, fontSize: 12, flexWrap: "wrap", justifyContent: "center", alignItems: "center" }}>
           <span style={{ color: "#facc15", fontWeight: 600 }}>You: {playerSteps}</span>
           <span style={{ color: "#a855f7", fontWeight: 600 }}>AI ({diff.desc}): {aiSteps}</span>
-          <span style={{ fontFamily: "monospace", color: "var(--muted)", fontSize: 13 }}>{fmtTime(elapsed)}</span>
-          {bestTime !== null && <span style={{ color: "var(--muted)", fontSize: 10 }}>Best: {fmtTime(bestTime)}</span>}
+          {/* Current time — monospace, larger */}
+          <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 14, color: "var(--ink)", letterSpacing: "0.03em" }}>
+            {fmtTime(elapsed)}
+          </span>
+          {/* Best time for this size */}
+          {bestTime !== null && (
+            <span style={{ fontFamily: "monospace", fontSize: 11, color: "var(--muted)", display: "flex", alignItems: "center", gap: 3 }}>
+              <span style={{ fontSize: 10 }}>🏆</span>
+              Best&nbsp;{fmtTime(bestTime)}
+            </span>
+          )}
         </div>
 
         {/* Canvas */}
@@ -477,6 +491,7 @@ export default function App() {
           {dpad("\u25B6", 0, 1)}
         </div>
 
+        {/* ── Menu ── */}
         {phase === "menu" && (
           <div style={{ textAlign: "center" }}>
             <button onClick={startRace} style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "10px 32px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
@@ -488,25 +503,55 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Win screen ── */}
         {phase === "won" && (
           <div style={{ textAlign: "center" }}>
-            <p style={{ color: "var(--success)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif" }}>You Win Level {level}!</p>
-            <p style={{ color: "var(--muted)", fontSize: 11 }}>
-              {fmtTime(elapsed)} | You: {playerSteps} | AI: {aiSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""}
+            {/* New-record celebration */}
+            {isNewRecord && (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                background: "linear-gradient(135deg,#fbbf24,#f59e0b)",
+                color: "#1c1917", borderRadius: 12, padding: "6px 16px",
+                fontWeight: 800, fontSize: 15, fontFamily: "Fraunces, serif",
+                marginBottom: 6, boxShadow: "0 2px 12px rgba(251,191,36,0.5)",
+                animation: "pulse 0.6s ease-in-out 3",
+              }}>
+                🏆 New Record! &nbsp;{fmtTime(elapsed)}
+              </div>
+            )}
+            <p style={{ color: "var(--success)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif", margin: "2px 0" }}>
+              {isNewRecord ? "🎉 You Win Level " : "You Win Level "}{level}!
             </p>
-            <button onClick={() => { setLevel(l => l + 1); const keys = Object.keys(DIFFS); const ni = Math.min(keys.indexOf(diffKey) + 1, keys.length - 1); setDiffKey(keys[ni]!); newMaze(keys[ni]!); }}
-              style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 4, cursor: "pointer" }}>
-              Next Level
-            </button>
+            <p style={{ color: "var(--muted)", fontSize: 11, margin: "2px 0" }}>
+              {!isNewRecord && <>{fmtTime(elapsed)} | </>}
+              You: {playerSteps} | AI: {aiSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""}
+              {bestTime !== null && !isNewRecord && <> | Best: {fmtTime(bestTime)}</>}
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 6 }}>
+              <button
+                onClick={() => { setLevel(l => l + 1); const keys = Object.keys(DIFFS); const ni = Math.min(keys.indexOf(diffKey) + 1, keys.length - 1); setDiffKey(keys[ni]!); newMaze(keys[ni]!); }}
+                style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 20px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                Next Level
+              </button>
+              <button
+                onClick={() => newMaze()}
+                style={{ background: "var(--panel)", color: "var(--ink)", border: "1px solid var(--line)", borderRadius: "var(--radius)", padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                Retry
+              </button>
+            </div>
           </div>
         )}
 
+        {/* ── Lost screen ── */}
         {phase === "lost" && (
           <div style={{ textAlign: "center" }}>
-            <p style={{ color: "var(--error)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif" }}>AI Wins</p>
-            <p style={{ color: "var(--muted)", fontSize: 11 }}>AI: {aiSteps} | You: {playerSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""} | {fmtTime(elapsed)}</p>
+            <p style={{ color: "var(--error)", fontWeight: 700, fontSize: 16, fontFamily: "Fraunces, serif", margin: "2px 0" }}>AI Wins</p>
+            <p style={{ color: "var(--muted)", fontSize: 11, margin: "2px 0" }}>
+              AI: {aiSteps} | You: {playerSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""} | {fmtTime(elapsed)}
+              {bestTime !== null && <> | Best: {fmtTime(bestTime)}</>}
+            </p>
             <button onClick={() => newMaze()}
-              style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 4, cursor: "pointer" }}>
+              style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 6, cursor: "pointer" }}>
               Try Again
             </button>
           </div>
