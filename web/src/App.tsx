@@ -10,7 +10,7 @@
  */
 
 import { GameShell, GameTopbar } from "@freegamestore/games";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   generateMaze,
   solve,
@@ -50,6 +50,10 @@ const AI_SPEEDS: AISpeed[] = [
 
 type Phase = "menu" | "playing" | "won" | "lost";
 type Facing = "right" | "left" | "up" | "down";
+
+function faceFor(dr: number, dc: number): Facing {
+  return dc > 0 ? "right" : dc < 0 ? "left" : dr < 0 ? "up" : "down";
+}
 
 /** Format seconds as  m:ss.t  (e.g. "1:04.3") or  0:ss.t  (e.g. "0:07.2") */
 function fmtTime(t: number): string {
@@ -231,20 +235,14 @@ export default function App() {
         dr = bufDr.current; dc = bufDc.current;
         playerDr.current = dr; playerDc.current = dc;
         hasBuf.current = false;
-        if (dc > 0) playerFace.current = "right";
-        else if (dc < 0) playerFace.current = "left";
-        else if (dr < 0) playerFace.current = "up";
-        else if (dr > 0) playerFace.current = "down";
+        playerFace.current = faceFor(dr, dc);
       }
 
       if (hasBuf.current && canMove(mz, cr, cc, bufDr.current, bufDc.current)) {
         dr = bufDr.current; dc = bufDc.current;
         playerDr.current = dr; playerDc.current = dc;
         hasBuf.current = false;
-        if (dc > 0) playerFace.current = "right";
-        else if (dc < 0) playerFace.current = "left";
-        else if (dr < 0) playerFace.current = "up";
-        else if (dr > 0) playerFace.current = "down";
+        playerFace.current = faceFor(dr, dc);
       }
 
       if (dr === 0 && dc === 0) return;
@@ -268,13 +266,12 @@ export default function App() {
 
     const applyDir = (dr: number, dc: number) => {
       if (phaseRef.current !== "playing") return;
-      const face: Facing = dc > 0 ? "right" : dc < 0 ? "left" : dr < 0 ? "up" : "down";
       if (dr !== playerDr.current || dc !== playerDc.current) {
         const mz = mazeRef.current;
         const [cr, cc] = playerPos.current;
         if ((playerDr.current === 0 && playerDc.current === 0) || canMove(mz, cr, cc, dr, dc)) {
           playerDr.current = dr; playerDc.current = dc;
-          playerFace.current = face; hasBuf.current = false;
+          playerFace.current = faceFor(dr, dc); hasBuf.current = false;
         } else {
           bufDr.current = dr; bufDc.current = dc; hasBuf.current = true;
         }
@@ -444,7 +441,8 @@ export default function App() {
   useEffect(() => () => clearTimers(), []);
 
   // Only compute optimal path on win/loss (never during play)
-  const optSteps = (phase === "won" || phase === "lost") ? solve(maze, "astar").path.length - 1 : null;
+  const raceOver = phase === "won" || phase === "lost";
+  const optSteps = useMemo(() => (raceOver ? solve(maze, "astar").path.length - 1 : null), [raceOver, maze]);
 
   const dpad = (label: string, dr: number, dc: number) => (
     <button
