@@ -20,6 +20,8 @@ import {
   type MazeRunner,
 } from "./lib/maze-solver";
 import { useBestTimes } from "./hooks/useBestTimes";
+import { readWins, writeWins } from "./lib/wins";
+import { syncCanvasSize } from "./lib/canvas";
 
 const CELL = 18;
 
@@ -68,7 +70,7 @@ export default function App() {
   const [maze, setMaze] = useState<Maze>(() => generateMaze(diff.size, diff.size));
   const [playerSteps, setPlayerSteps] = useState(0);
   const [aiSteps, setAiSteps] = useState(0);
-  const [score, setScore] = useState(0);
+  const [score, setScore] = useState(readWins);
   const [level, setLevel] = useState(1);
   const [elapsed, setElapsed] = useState(0);
   // Best time for the currently-selected difficulty size (from localStorage)
@@ -99,6 +101,7 @@ export default function App() {
   mazeRef.current = maze;
   const aiMsRef = useRef(aiSpeed.ms);
   aiMsRef.current = aiSpeed.ms;
+  const applyDirRef = useRef<(dr: number, dc: number) => void>(() => {});
   // Keep diff ref stable for finishWin closure
   const diffRef = useRef(diff);
   diffRef.current = diff;
@@ -115,9 +118,8 @@ export default function App() {
     if (clockTimer.current) { clearInterval(clockTimer.current); clockTimer.current = null; }
   };
 
-  const newMaze = useCallback((dk?: string) => {
-    const d = DIFFS[dk ?? diffKey]!;
-    const m = generateMaze(d.size, d.size);
+  /** Back to the menu on maze `m` with everything reset. */
+  const resetRace = useCallback((m: Maze) => {
     setMaze(m);
     setPhase("menu");
     setPlayerSteps(0);
@@ -137,11 +139,21 @@ export default function App() {
     aiTrail.current = new Set();
     clearTimers();
     aiRunner.current = null;
-  }, [diffKey]);
+  }, []);
+
+  const newMaze = useCallback((dk?: string) => {
+    const d = DIFFS[dk ?? diffKey]!;
+    resetRace(generateMaze(d.size, d.size));
+  }, [diffKey, resetRace]);
+
+  /** Replay the maze just raced (Retry / Try Again). */
+  const retryMaze = useCallback(() => resetRace(mazeRef.current), [resetRace]);
 
   const finishWin = useCallback(() => {
     setPhase("won");
-    setScore(s => s + 1);
+    const wins = readWins() + 1;
+    writeWins(wins);
+    setScore(wins);
     clearTimers();
     const t = (performance.now() - startTime.current) / 1000;
     setElapsed(t);
@@ -270,6 +282,8 @@ export default function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Leave browser shortcuts (Cmd/Ctrl +/- zoom, Cmd+S, ...) alone.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const dir = dirMap[e.key];
       if (dir) {
         e.preventDefault();
@@ -313,7 +327,7 @@ export default function App() {
       else applyDir(dy > 0 ? 1 : -1, 0);
     };
 
-    (window as any).__mazeSetDir = applyDir;
+    applyDirRef.current = applyDir;
 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -359,8 +373,9 @@ export default function App() {
     const draw = () => {
       frame++;
       const mz = mazeRef.current;
-      canvas.width = mz.cols * CELL;
-      canvas.height = mz.rows * CELL;
+      syncCanvasSize(canvas, mz.cols * CELL, mz.rows * CELL);
+      // Trail fills are translucent, so start each frame from a clear canvas.
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       const dk = matchMedia("(prefers-color-scheme: dark)").matches;
 
       for (let r = 0; r < mz.rows; r++) {
@@ -433,7 +448,7 @@ export default function App() {
 
   const dpad = (label: string, dr: number, dc: number) => (
     <button
-      onPointerDown={(e) => { e.preventDefault(); (window as any).__mazeSetDir?.(dr, dc); }}
+      onPointerDown={(e) => { e.preventDefault(); applyDirRef.current(dr, dc); }}
       style={{ width: 44, height: 44, borderRadius: 10, border: "1px solid var(--line)", background: "var(--panel)", color: "var(--ink)", fontSize: 18, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", touchAction: "manipulation", userSelect: "none" }}
     >{label}</button>
   );
@@ -534,7 +549,7 @@ export default function App() {
                 Next Level
               </button>
               <button
-                onClick={() => newMaze()}
+                onClick={retryMaze}
                 style={{ background: "var(--panel)", color: "var(--ink)", border: "1px solid var(--line)", borderRadius: "var(--radius)", padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
                 Retry
               </button>
@@ -550,7 +565,7 @@ export default function App() {
               AI: {aiSteps} | You: {playerSteps}{optSteps != null ? ` | Optimal: ${optSteps}` : ""} | {fmtTime(elapsed)}
               {bestTime !== null && <> | Best: {fmtTime(bestTime)}</>}
             </p>
-            <button onClick={() => newMaze()}
+            <button onClick={retryMaze}
               style={{ background: "var(--accent)", color: "#fff", border: "none", borderRadius: "var(--radius)", padding: "8px 24px", fontSize: 13, fontWeight: 600, marginTop: 6, cursor: "pointer" }}>
               Try Again
             </button>
